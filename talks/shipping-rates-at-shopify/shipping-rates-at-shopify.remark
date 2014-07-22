@@ -1,0 +1,440 @@
+class: center, middle
+
+#Shipping Rates at Shopify 
+-- or --
+
+**How to handle slow external calls and keep your users happy**
+
+---
+class: center, middle
+
+#@christianblais
+
+???
+
+Hey, I'm Christian, and as you may have guessed, I work at Shopify.
+
+---
+class: center, middle
+
+#What is Shopify?
+
+???
+
+Shopify is an commerce platform where merchants can manage everything from their product inventory, payments, blog, discounts and, of course, shipping rates.
+
+---
+class: center, middle
+
+#What is a Shipping Rate?
+
+???
+
+What we call a shipping rate is the cost of shipping something from point A to point B.
+
+So why is this important? Why am I telling your this?
+
+Who has ever bought something online, not knowing what the border taxes would be? Now imagine the same thing with shipping rates. Because we know if can be expensive, we want to know in advance what the shipping rate will be.
+
+It can be a fixed amount. As a merchant, I could decide that shipping something from my shop to anyone in Canada is 10$, shipping to US is 15$, and 20$ for the rest of the world. Easy enough.
+
+But what if...
+
+What if you sell anything from hand drawn postal cards to 10 feet tall marble statues. Of course, shipping rates vary a lot depending on the destination, but it also vary based on the nature of what you ship.
+
+For the sake of this presentation, it's good enough to say that shipping rates depend on;
+
+* Address of origin
+* Address of destination
+* Total Price
+* Total Weigth
+
+---
+class: center, middle
+
+#Fedex, UPS, Canada Post, ...
+
+???
+
+Fortunately for us, Fedex, UPS and other shipping providers offer online services that we can query in order to know what the shipping rate for any given checkout would be.
+
+But believe me, it's not that easy. As an example, here's how a query to Fedex might looks like...
+
+---
+
+```ruby
+
+xml_request = XmlNode.new('RateRequest', '//fedex.com/ws/rate/v13') do |root|
+  # Version
+  root << XmlNode.new('Version') do |version_node|
+    version_node << XmlNode.new('ServiceId', 'crs')
+    version_node << XmlNode.new('Major', '13')
+    version_node << XmlNode.new('Intermediate', '0')
+    version_node << XmlNode.new('Minor', '0')
+  end
+  
+  # Returns delivery dates
+  root << XmlNode.new('ReturnTransitAndCommit', true)
+  # Returns saturday delivery shipping options when available
+  root << XmlNode.new('VariableOptions', 'SATURDAY_DELIVERY')
+  
+  root << XmlNode.new('RequestedShipment') do |rs|
+    rs << XmlNode.new('ShipTimestamp', ship_timestamp(options[:turn_around_time]))
+  
+    freight = has_freight?(options)
+
+    if !freight
+      # fedex api wants this up here otherwise request returns an error
+      rs << XmlNode.new('DropoffType', options[:dropoff] || 'REGULAR_PICKUP')
+      rs << XmlNode.new('PackagingType', options[:packaging] || 'YOUR_PACKAGING')
+    end
+    
+    rs << build_location_node('Shipper', (options[:shipper] || origin))
+    rs << build_location_node('Recipient', destination)
+    if options[:shipper] and options[:shipper] != origin
+      rs << build_location_node('Origin', origin)
+    end
+    
+    [...]
+
+```
+
+???
+
+Yeah. No comment.
+
+---
+class: center, middle
+
+#ActiveShipping
+
+```ruby
+packages = [ Package.new( 100, [15, 10, 4.5]) ] # weigth, dimensions
+rates = Fedex.new(credentials).find_rates(origin, destination, packages)
+
+```
+*github.com/Shopify/active_shipping*
+
+???
+
+Because each and every shipping provider provides a different API to their service, Shopify open sourced a small gem called ActiveShipping. It provides a common interface to UPS, USPS, Fedex, Canada Post and more.
+
+I won't go that much more into ActiveShipping details, I just want you to know that it exists because we'll use it later on.
+
+---
+class: center, middle
+
+#All good?
+
+```ruby
+
+class CheckoutsController < ApplicationController
+
+  def show
+  	@checkout = Checkout.find(params[:id])
+  	
+  	fedex_rates = Fedex.new(credentials).find_rates(
+  	  @checkout.origin,
+  	  @checkout.destination,
+  	  @checkout.total_weigth,
+  	  @checkout.total_price
+  	)
+  	
+  	ups_rates = UPS.new(credentials).find_rates(
+  	  @checkout.origin,
+  	  @checkout.destination,
+  	  @checkout.total_weigth,
+  	  @checkout.total_price
+  	)
+  	
+  	@shipping_rates = fedex_rates + ups_rates
+  end
+
+end
+
+```
+
+???
+
+What is wrong with such an approach?
+
+Well, for one thing, we introduced an external calls in the middle of a user request, which mean that our site response time is now dependent on Fedex and UPS response time. And the network. And everything else that could go wrong in an external call. Because believe me, things will go wrong. If Fedex takes 2 seconds to respond, you add these 2 seconds to your regular response time. What happen if Fedex is down? Because believe me, Fedex will be down at some point.
+
+So we need a way to extract those calls out of the user request. And this is true for shipping rates as it is for any other external calls.
+
+---
+class: center, middle
+
+#ActiveJob
+
+???
+
+So a good solution would be to background all external calls. That would allow us to repond to the user in a timely manner, while we're still waiting for an answer from our shipping providers.
+
+Does any of you know ActiveJob? ActiveJob is a framework for declaring jobs and making them run on a variety of queuing backends. These jobs can be anyhing from sending emails, cleaning your database or... doing external calls.
+
+Does `ActiveMailer.deliver_later` rings a bell? Well, that's ActiveJob.
+
+ActiveJob still isn't part of Rails core, but it's suppose to be pretty soon. For now, it's available as a gem.
+
+---
+class: center, middle
+
+#ActiveJob
+
+```ruby
+class ShippingRatesJob < ActiveJob::Base
+  queue_as :shipping_rates_jobs
+
+  def perform(origin, destination, weigth, price)
+    # Get all the shipping rates with supported providers
+  end
+end
+```
+
+```ruby
+ShippingRatesJob.enqueue(
+  checkout.origin,
+  checkout.destination,
+  checkout.total_weigth,
+  checkout.total_price
+)
+```
+
+???
+
+That's it! As soon as a worker is ready, job will be picked up and performed.
+
+---
+class: center, middle
+
+#Communication Channel
+
+???
+
+Now what? Our background job runs, then... what?
+
+Of course, we now need a communication channel between our job and the rest of the application. Our checkout needs to know if shipping rates have been fetched; if they're available to show to the customer.
+
+At this stage, the communication channel could be anything. You could use a database with a shipping rates table, a serialized column inside your checkout table. For this example, I'll use redis as this is what we're using at Shopify.
+
+---
+class: center, middle
+
+#Redis
+
+```ruby
+# save rates to redis using json
+Rails.redis.set('shipping-rates', rates.to_json)
+```
+
+```ruby
+# retrieve rates and parse them
+rates = Rails.redis.get('shipping-rates')
+rates = JSON.parse(rates)
+```
+
+???
+
+Redis is a key/value store that can be used for all sorts of data. As an example, we could use it to store shipping rates using the following format.
+
+So I guess this is a good news. We can now save rates in redis in the background job, and we'll be able to retrieve them from inside our Rails app.
+
+So we're all good, right?
+
+No? So what's wrong with this example?
+
+Well, this works perfectly, as long as we have no more than a single customer on our shop. We need a way to cache shipping rates at a customer level. Ok, got it. Easy to change.
+
+---
+class: center, middle
+
+#Redis, take 2
+
+```ruby
+Rails.redis.set("shipping-rates-#{checkout.token}", rates.to_json)
+```
+
+???
+
+What have we done here? We changed the cache key so it contains the checkout token. What this means is that each checkout will now have his own cached shipping rates.
+
+Better? Hell yeah. But wait... What if I add another item to my checkout? What happens if I change my shipping address? Remember what we said earlier regarding shipping rates, that they depend on a bunch of different factors. If one of them change, don't we need to change our shipping rates accordingly?
+
+---
+class: center, middle
+
+#Redis, take 3
+
+```ruby
+cache_key = []
+cache_key << "shipping-rates"
+cache_key << checkout.token
+cache_key << checkout.origin.signature
+cache_key << checkout.destination.signature
+cache_key << checkout.total_weigth
+cache_key << checkout.total_price
+
+Rails.redis.set(cache_key.join('-'), rates.to_json)
+```
+
+???
+
+Ah. Better. So what exactly do we have here?
+
+Whenever you cache something, it's important to be able to expire the cache as soon as it's not valid anymore. It could be done by explicity expiring said cache, or by using a cache key that encapsulate everything that might invalidate the cache. That way, if something changes along the way, the cache key change accordingly and you don't end up with outdated data.
+
+As some of you may have guessed, this is still not perfect. As an example, a shop might stop supporting a specific shipping provider, or we might need to automatically invalidate the cache every x hours to keep our prices up to date with Fedex and USPS. But it's good enough for our purposes, so let's move on.
+
+---
+
+```ruby
+class CachedShippingRates
+  def initialize(checkout)
+    @checkout = checkout
+  end
+  
+  def rates
+    JSON.parse(Rails.redis.get(cache_key, 'rates'))
+  end
+  
+  def prepare
+    ShippingRatesJob.enqueue(
+      @checkout.origin,
+      @checkout.destination,
+      @checkout.total_weigth,
+      @checkout.total_price
+    )
+  end
+  
+  def store(value)
+    Rails.redis.set(cache_key, value.to_json)
+  end
+  
+  def exists?
+    Rails.redis.exists(cache_key)
+  end
+  
+  private
+  
+  def cache_key
+    [...]
+  end
+end
+```
+
+???
+
+So as we saw, our background job needs a way to store shipping rates.
+
+Our controller will need a way to retrieve them, and a way to know if they're ready or not.
+
+I figured this would be easier to read and understand if all these functionalities were wrapped up in a single class.
+
+---
+class: center, middle
+
+#Public Interface
+
+```ruby
+class checkout < ActiveRecord::Base
+  
+  [...]
+  
+  def shipping_rates
+    @shipping_rates ||= CachedShippingRates.new(self)
+  end
+  
+end
+```
+
+```ruby
+checkout.shipping_rates.prepare      # queue de job
+checkout.shipping_rates.store(value) # store given shipping rates in cache
+checkout.shipping_rates.exists?      # check if cache is present
+checkout.shipping_rates.rates        # returns shipping rates from cache
+```
+
+???
+
+and with this, we now have a nifty interface to prepare, store and retrieve our shipping rates.
+
+---
+class: center, middle
+
+#Controller
+
+```ruby
+class checkoutsController < ApplicationController
+  before_action :prepare_shipping_rates
+      
+  def show
+    [...]
+  end
+  
+  private
+  
+  def checkout
+    @checkout ||= Checkout.find(params[:id])
+  end
+  
+  def prepare_shipping_rates
+    return if checkout.shipping_rates.exists?
+    checkout.shipping_rates.prepare
+  end
+end
+```
+
+???
+
+In the controller, things couldn't be simpler then that. Now that we have some helper methods on checkout, as you can see, it's super easy to interact with shipping rates. No need to worry about the cache key and the overhead from the background job is minimal.
+
+---
+class: center, middle
+
+#View
+
+```erb
+<head>
+  <% unless @checkout.shipping_rates.exists? %>
+    <meta http-equiv="refresh" content="3">
+  <% end %>
+</head>
+
+<body>
+  <div id="shipping-rates">
+    
+    <% if @checkout.shipping_rates.exists? %>
+      <% @checkout.shipping_rates.rates.each do |rate| %>
+       <label>#{rate.name}</label>
+       <input type="radio" name="shipping_rates" value="#{rate.id}">
+      <% end %>
+    <% else %>
+      Please wait while we fetch available shipping rates…
+    <% end %>
+    
+  </div>
+</body>
+```
+
+???
+
+And same thing with the view, were we can now simply ask if shipping rates are ready or not. If not, we schedule a page refresh in a couple of seconds, enough for the background job to complete. Things could have been fancier with an ajax refresh or something similar, now that we're here it would be fairly easy to implement.
+
+For Shopify, as we need to support noscript, this is our implementation, on top of which we added a javascript layer that transforms the call in an ajax request if javascript is enabled.
+
+---
+class: center, middle
+
+#Conclusion
+
+???
+
+So while it's not real code, it's actually quite close from our real implementation. The example I've shown are far from perfect and could be improved in a lot of ways, but the main idea here was to demistify backgrounded job and to show you they're not only for sending emails.
+
+---
+class: center, middle
+
+#Thank you
+
+@christianblais
