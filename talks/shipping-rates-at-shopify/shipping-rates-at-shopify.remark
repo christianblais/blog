@@ -1,6 +1,6 @@
 class: center, middle
 
-#Shipping Rates at Shopify 
+#Shipping Rates at Shopify
 -- or --
 
 **How to handle slow external calls and keep your users happy**
@@ -34,13 +34,15 @@ What we call a shipping rate is the cost of shipping something from point A to p
 
 So why is this important? Why am I telling your this?
 
-Who has ever bought something online, not knowing what the border taxes would be? Now imagine the same thing with shipping rates. Because we know if can be expensive, we want to know in advance what the shipping rate will be.
+Who has ever bought something online, not knowing what the border taxes would be? Now imagine the same thing with shipping rates. Imagine that each time you buy something online, there wasn't a way to figure out how much shipping would cost you.
+
+Customers want to know in advance what the shipping rate will be.
 
 It can be a fixed amount. As a merchant, I could decide that shipping something from my shop to anyone in Canada is 10$, shipping to US is 15$, and 20$ for the rest of the world. Easy enough.
 
 But what if...
 
-What if you sell anything from hand drawn postal cards to 10 feet tall marble statues. Of course, shipping rates vary a lot depending on the destination, but it also vary based on the nature of what you ship.
+What if you sell anything from hand drawn postal cards to 10 feet tall marble statues. Of course, shipping rates vary a lot depending on the destination, but they do vary a lot based on the nature of what you ship.
 
 For the sake of this presentation, it's good enough to say that shipping rates depend on;
 
@@ -55,6 +57,8 @@ class: center, middle
 #Fedex, UPS, Canada Post, ...
 
 ???
+
+So, how do you know how much shipping it will cost? Do you need to do the math yourself?
 
 Fortunately for us, Fedex, UPS and other shipping providers offer online services that we can query in order to know what the shipping rate for any given checkout would be.
 
@@ -72,15 +76,15 @@ xml_request = XmlNode.new('RateRequest', '//fedex.com/ws/rate/v13') do |root|
     version_node << XmlNode.new('Intermediate', '0')
     version_node << XmlNode.new('Minor', '0')
   end
-  
+
   # Returns delivery dates
   root << XmlNode.new('ReturnTransitAndCommit', true)
   # Returns saturday delivery shipping options when available
   root << XmlNode.new('VariableOptions', 'SATURDAY_DELIVERY')
-  
+
   root << XmlNode.new('RequestedShipment') do |rs|
     rs << XmlNode.new('ShipTimestamp', ship_timestamp(options[:turn_around_time]))
-  
+
     freight = has_freight?(options)
 
     if !freight
@@ -88,13 +92,13 @@ xml_request = XmlNode.new('RateRequest', '//fedex.com/ws/rate/v13') do |root|
       rs << XmlNode.new('DropoffType', options[:dropoff] || 'REGULAR_PICKUP')
       rs << XmlNode.new('PackagingType', options[:packaging] || 'YOUR_PACKAGING')
     end
-    
+
     rs << build_location_node('Shipper', (options[:shipper] || origin))
     rs << build_location_node('Recipient', destination)
     if options[:shipper] and options[:shipper] != origin
       rs << build_location_node('Origin', origin)
     end
-    
+
     [...]
 
 ```
@@ -109,8 +113,12 @@ class: center, middle
 #ActiveShipping
 
 ```ruby
-packages = [ Package.new( 100, [15, 10, 4.5]) ] # weigth, dimensions
-rates = Fedex.new(credentials).find_rates(origin, destination, packages)
+Fedex.new(credentials).find_rates(origin, destination, total_weight, total_price)
+
+```
+
+```ruby
+UPS.new(credentials).find_rates(origin, destination, total_weight, total_price)
 
 ```
 *github.com/Shopify/active_shipping*
@@ -129,36 +137,36 @@ class: center, middle
 ```ruby
 
 class CheckoutsController < ApplicationController
-
   def show
   	@checkout = Checkout.find(params[:id])
-  	
+
   	fedex_rates = Fedex.new(credentials).find_rates(
   	  @checkout.origin,
   	  @checkout.destination,
   	  @checkout.total_weigth,
   	  @checkout.total_price
   	)
-  	
+
   	ups_rates = UPS.new(credentials).find_rates(
   	  @checkout.origin,
   	  @checkout.destination,
   	  @checkout.total_weigth,
   	  @checkout.total_price
   	)
-  	
+
   	@shipping_rates = fedex_rates + ups_rates
   end
-
 end
 
 ```
 
 ???
 
+So, we now have all the tools we want to calculate shipping rates, right?
+
 What is wrong with such an approach?
 
-Well, for one thing, we introduced an external calls in the middle of a user request, which mean that our site response time is now dependent on Fedex and UPS response time. And the network. And everything else that could go wrong in an external call. Because believe me, things will go wrong. If Fedex takes 2 seconds to respond, you add these 2 seconds to your regular response time. What happen if Fedex is down? Because believe me, Fedex will be down at some point.
+Well, for one thing, we introduced external calls in the middle of a user request, which mean that our site response time is now dependent on Fedex and UPS response time. And the network. And everything else that could go wrong in an external call. Because believe me, things will go wrong. If Fedex takes 2 seconds to respond, you add these 2 seconds to your regular response time. Moreover, what happen if Fedex is down? Because believe me, Fedex will be down at some point.
 
 So we need a way to extract those calls out of the user request. And this is true for shipping rates as it is for any other external calls.
 
@@ -166,6 +174,8 @@ So we need a way to extract those calls out of the user request. And this is tru
 class: center, middle
 
 #ActiveJob
+
+Rails 4.2
 
 ???
 
@@ -193,17 +203,25 @@ end
 ```
 
 ```ruby
-ShippingRatesJob.enqueue(
-  checkout.origin,
-  checkout.destination,
-  checkout.total_weigth,
-  checkout.total_price
-)
+class CheckoutsController < ApplicationController
+  def show
+    @checkout = Checkout.find(params[:id])
+
+    ShippingRatesJob.enqueue(
+      checkout.origin,
+      checkout.destination,
+      checkout.total_weigth,
+      checkout.total_price
+    )
+  end
+end
 ```
 
 ???
 
-That's it! As soon as a worker is ready, job will be picked up and performed.
+You define a class with a perform methods, which can take any arguments. In our case, we'll receive origin, destination, weight and price. You can then queue the job from anywhere in your code, which will be our show action from now. That's it! As soon as a worker is ready, job will be picked up and performed.
+
+But now what? We lost the @shipping_rates variable, so we can't use it in the view anymore. Also, the job will run... then what?
 
 ---
 class: center, middle
@@ -211,8 +229,6 @@ class: center, middle
 #Communication Channel
 
 ???
-
-Now what? Our background job runs, then... what?
 
 Of course, we now need a communication channel between our job and the rest of the application. Our checkout needs to know if shipping rates have been fetched; if they're available to show to the customer.
 
@@ -293,11 +309,11 @@ class CachedShippingRates
   def initialize(checkout)
     @checkout = checkout
   end
-  
+
   def rates
     JSON.parse(Rails.redis.get(cache_key, 'rates'))
   end
-  
+
   def prepare
     ShippingRatesJob.enqueue(
       @checkout.origin,
@@ -306,17 +322,17 @@ class CachedShippingRates
       @checkout.total_price
     )
   end
-  
+
   def store(value)
     Rails.redis.set(cache_key, value.to_json)
   end
-  
+
   def exists?
     Rails.redis.exists(cache_key)
   end
-  
+
   private
-  
+
   def cache_key
     [...]
   end
@@ -329,6 +345,8 @@ So as we saw, our background job needs a way to store shipping rates.
 
 Our controller will need a way to retrieve them, and a way to know if they're ready or not.
 
+We also saw that the cache key contains somewhat a lot of logic, so we don't want to duplicate all this stuff everywhere.
+
 I figured this would be easier to read and understand if all these functionalities were wrapped up in a single class.
 
 ---
@@ -337,14 +355,14 @@ class: center, middle
 #Public Interface
 
 ```ruby
-class checkout < ActiveRecord::Base
-  
+class Checkout < ActiveRecord::Base
+
   [...]
-  
+
   def shipping_rates
     @shipping_rates ||= CachedShippingRates.new(self)
   end
-  
+
 end
 ```
 
@@ -365,19 +383,19 @@ class: center, middle
 #Controller
 
 ```ruby
-class checkoutsController < ApplicationController
+class CheckoutsController < ApplicationController
   before_action :prepare_shipping_rates
-      
+
   def show
     [...]
   end
-  
+
   private
-  
+
   def checkout
     @checkout ||= Checkout.find(params[:id])
   end
-  
+
   def prepare_shipping_rates
     return if checkout.shipping_rates.exists?
     checkout.shipping_rates.prepare
@@ -394,32 +412,45 @@ class: center, middle
 
 #View
 
+Body
+
+```erb
+<div id="shipping-rates">
+
+  <% if @checkout.shipping_rates.exists? %>
+    <% @checkout.shipping_rates.rates.each do |rate| %>
+     <label>#{rate.name}</label>
+     <input type="radio" name="shipping_rates" value="#{rate.id}">
+    <% end %>
+  <% else %>
+    Please wait while we fetch available shipping rates…
+  <% end %>
+
+</div>
+```
+
+???
+
+And same thing with the view, were things are still very simple. If first check if shipping rates exists, in which case we iterate over them. Otherwise, we warn the customer that they're still not ready.
+
+---
+class: center, middle
+
+#View
+
+Head
+
 ```erb
 <head>
   <% unless @checkout.shipping_rates.exists? %>
     <meta http-equiv="refresh" content="3">
   <% end %>
 </head>
-
-<body>
-  <div id="shipping-rates">
-    
-    <% if @checkout.shipping_rates.exists? %>
-      <% @checkout.shipping_rates.rates.each do |rate| %>
-       <label>#{rate.name}</label>
-       <input type="radio" name="shipping_rates" value="#{rate.id}">
-      <% end %>
-    <% else %>
-      Please wait while we fetch available shipping rates…
-    <% end %>
-    
-  </div>
-</body>
 ```
 
 ???
 
-And same thing with the view, were we can now simply ask if shipping rates are ready or not. If not, we schedule a page refresh in a couple of seconds, enough for the background job to complete. Things could have been fancier with an ajax refresh or something similar, now that we're here it would be fairly easy to implement.
+We can now simply ask if shipping rates are ready or not. If not, we schedule a page refresh in a couple of seconds, enough for the background job to complete. Things could have been fancier with an ajax refresh or something similar, now that we're here it would be fairly easy to implement.
 
 For Shopify, as we need to support noscript, this is our implementation, on top of which we added a javascript layer that transforms the call in an ajax request if javascript is enabled.
 
