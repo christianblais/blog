@@ -8,6 +8,23 @@ class: center, middle
 ---
 class: center, middle
 
+#Shipping... What?
+Boooring!
+
+???
+
+So why am I doing this talk? Why should you care about how Shopify implemented their shipping rates?
+
+Well, first of all, we're paying for the pizza and the beer, so you don't really have the choice.
+
+But most importantly, this is not solely about shipping rates. I mean, yes, it is about shipping rates,
+but it is mainly about how we deal with slow queries, external calls and anything that could slow down our response time.
+
+So yeah, I'll talk about shipping rates, but it could be anything.
+
+---
+class: center, middle
+
 #@christianblais
 
 ???
